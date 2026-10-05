@@ -30,7 +30,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.isotonic import IsotonicRegression
+from sklearn.isotonic import IsotonicRegression  # noqa: F401 (เก็บไว้เผื่อเปรียบเทียบ)
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     average_precision_score,
@@ -211,6 +211,22 @@ def evaluate(name: str, y: np.ndarray, p: np.ndarray, thr: float = 0.5) -> dict:
     }
 
 
+
+class SigmoidCalibrator:
+    """Platt scaling บน logit ของความน่าจะเป็น -> ได้กราฟเรียบ ต่อเนื่อง
+    (Isotonic ให้ค่าเป็นขั้นบันได ทำให้ input ต่างกันได้ % เท่ากัน ซึ่งสับสนเมื่อใช้ในแอป)"""
+
+    def fit(self, p, y):
+        z = np.log(np.clip(p, 1e-6, 1 - 1e-6) / (1 - np.clip(p, 1e-6, 1 - 1e-6))).reshape(-1, 1)
+        self.lr_ = LogisticRegression(C=1e6).fit(z, y)
+        return self
+
+    def predict(self, p):
+        p = np.asarray(p, dtype=float)
+        z = np.log(np.clip(p, 1e-6, 1 - 1e-6) / (1 - np.clip(p, 1e-6, 1 - 1e-6))).reshape(-1, 1)
+        return self.lr_.predict_proba(z)[:, 1]
+
+
 def train_and_select(train, calib, test, out_dir):
     X_tr, y_tr = train[FEATURES], train[TARGET].values
     X_ca, y_ca = calib[FEATURES], calib[TARGET].values
@@ -220,8 +236,8 @@ def train_and_select(train, calib, test, out_dir):
     for name, pipe in build_models().items():
         pipe.fit(X_tr, y_tr)
         p_ca_raw = pipe.predict_proba(X_ca)[:, 1]
-        # Isotonic calibration บนช่วงเวลาที่ไม่ได้ใช้เทรน -> แก้ drift ของอัตรายกเลิก
-        iso = IsotonicRegression(out_of_bounds="clip", y_min=1e-4, y_max=1 - 1e-4).fit(p_ca_raw, y_ca)
+        # Sigmoid (Platt) calibration บนช่วงเวลาที่ไม่ได้ใช้เทรน -> แก้ drift ของอัตรายกเลิก
+        iso = SigmoidCalibrator().fit(p_ca_raw, y_ca)
         p_te_raw = pipe.predict_proba(X_te)[:, 1]
         p_te = iso.predict(p_te_raw)
         results.append(evaluate(name + " (raw)", y_te, p_te_raw))
