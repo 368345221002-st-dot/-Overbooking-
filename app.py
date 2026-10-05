@@ -148,12 +148,16 @@ div[data-testid="stFormSubmitButton"] button p { color:#fff !important; font-fam
          display:flex; justify-content:space-between; align-items:center; }
 .money span { color:var(--muted); font-size:.88rem; text-align:left; }
 .money b { font-family:'Mali',cursive; color:#e8590c; font-size:1.7rem; }
-.why { text-align:left; background:#fbf9ff; border-radius:20px; padding:12px 14px; margin-bottom:14px; }
-.why-t { font-weight:500; color:var(--ink); margin-bottom:6px; }
-.r { display:flex; gap:10px; align-items:flex-start; padding:5px 0; font-size:.9rem; color:var(--ink); }
-.r i { font-style:normal; flex:none; width:24px; height:24px; border-radius:8px; display:flex;
-       align-items:center; justify-content:center; font-size:.8rem; font-weight:700; color:#fff; }
-.r i.up { background:#ff4d6d; } .r i.down { background:#12b76a; }
+.odds { display:flex; gap:10px; margin:4px 0 10px; }
+.o { flex:1; border-radius:18px; padding:10px 12px; text-align:left; }
+.o span { display:block; font-size:.88rem; color:var(--ink); }
+.o b { font-family:'Mali',cursive; font-size:2rem; line-height:1.1; }
+.o.stay { background:#e7f9ef; } .o.stay b { color:#12b76a; }
+.o.cxl { background:#ffeef1; } .o.cxl b { color:#ff4d6d; }
+.split { display:flex; height:22px; border-radius:99px; overflow:hidden; border:3px solid #ebe3ff; margin-bottom:6px; }
+.split .g { background:repeating-linear-gradient(45deg,#3ddc97 0 14px,#6ee7b7 14px 28px); animation:grow 1s ease; }
+.split .r { flex:1; background:repeating-linear-gradient(45deg,#ff4d6d 0 14px,#ff7a90 14px 28px); }
+.scale { justify-content:center !important; }
 .foot { text-align:center; color:var(--muted); font-size:.82rem; margin-top:26px; }
 </style>
 <div class="floaty" style="left:2%;top:18%">☁️</div>
@@ -236,43 +240,10 @@ def load_model() -> dict:
     return m
 
 
-def predict(m: dict, row: dict) -> tuple[float, dict]:
-    """คืนค่า (โอกาสยกเลิก, ผลของแต่ละปัจจัย) — ผลของปัจจัยใช้อธิบายเหตุผลให้คนอ่านเข้าใจ"""
+def predict(m: dict, row: dict) -> float:
+    """คืนค่าโอกาสยกเลิก (0–1)"""
     X = make_X(pd.DataFrame([row]), m["cats"])
-    p = float(calibrate(m["clf"].predict_proba(X)[:, 1], *m["cal"])[0])
-    contrib = m["clf"].booster_.predict(X, pred_contrib=True)[0][:-1]
-    return p, dict(zip(FEATS, contrib))
-
-
-def explain(contrib, p_base, p, deposit, lead_time, nights, price, hotel, segment, country, arrival) -> str:
-    """แปลงผลของแต่ละปัจจัยเป็นประโยคภาษาคน (แสดง 3 ปัจจัยหลัก + เรื่องมัดจำ)"""
-    seg, place = SEGMENT_TH[segment].split("  ")[-1], HOTEL_TH[hotel].split("  ")[-1]
-    up = {"lead_time": f"จองล่วงหน้า {lead_time} วัน มีเวลาเปลี่ยนใจได้นาน",
-          "market_segment": f"จองผ่าน{seg} มักยกเลิกบ่อย",
-          "country": f"ลูกค้าจาก{COUNTRY_TH[country]}ยกเลิกค่อนข้างบ่อย",
-          "hotel": f"{place}มักถูกยกเลิกบ่อยกว่า",
-          "arrival_month": f"เข้าพักเดือน{TH_MONTHS[arrival.month - 1]} คนยกเลิกบ่อย",
-          "nights": f"พัก {nights} คืน มักยกเลิกบ่อยกว่า",
-          "weekend_nights": "จำนวนคืนวันหยุดแบบนี้ยกเลิกบ่อย",
-          "adr": f"ราคา ฿{price:,}/คืน ระดับนี้คนยกเลิกบ่อย"}
-    down = {"lead_time": f"จองใกล้วันเข้าพัก ({lead_time} วัน) มักมาจริง",
-            "market_segment": f"จองผ่าน{seg} มักมาพักจริง",
-            "country": f"ลูกค้าจาก{COUNTRY_TH[country]}มักมาพักจริง",
-            "hotel": f"{place}มักถูกยกเลิกน้อยกว่า",
-            "arrival_month": f"เข้าพักเดือน{TH_MONTHS[arrival.month - 1]} คนมักมาจริง",
-            "nights": f"พัก {nights} คืน มักมาจริง",
-            "weekend_nights": "มีคืนวันหยุด ลูกค้ามักมาเที่ยวจริง",
-            "adr": f"ราคา ฿{price:,}/คืน ระดับนี้คนมักมาจริง"}
-    top = sorted(contrib.items(), key=lambda kv: -abs(kv[1]))[:3]
-    rows = [(v > 0, (up if v > 0 else down)[k]) for k, v in top if abs(v) > 0.05]
-    if deposit == "No Deposit":
-        rows.append((True, "ไม่มีเงินมัดจำ ยกเลิกได้ฟรี ไม่เสียอะไร"))
-    elif deposit == "Refundable":
-        rows.append((False, f"มีเงินมัดจำ ลดโอกาสยกเลิกจาก {p_base:.0%} เหลือ {p:.0%}"))
-    else:
-        rows.append((False, f"มัดจำไม่คืนเงิน ยกเลิกแล้วเสียเงิน ลดจาก {p_base:.0%} เหลือ {p:.0%}"))
-    return "".join(f'<div class="r"><i class="{"up" if u else "down"}">{"▲" if u else "▼"}</i>{t}</div>'
-                   for u, t in rows)
+    return float(calibrate(m["clf"].predict_proba(X)[:, 1], *m["cal"])[0])
 
 
 def thai_date(d: dt.date) -> str:
@@ -333,13 +304,11 @@ with right:
     else:
         stay_dates = [arrival + dt.timedelta(days=i) for i in range(nights)]
         weekend = sum(d.weekday() >= 5 for d in stay_dates)
-        p_base, contrib = predict(model, dict(
+        p_base = predict(model, dict(
             hotel=hotel, market_segment=segment, country=country, arrival_month=arrival.month,
             lead_time=lead_time, nights=nights, weekend_nights=weekend,
             adr=price_thb / EUR_TO_THB))                    # บาท -> ยูโร ก่อนเข้าโมเดล
         p = adjust_for_deposit(p_base, deposit)
-        reasons = explain(contrib, p_base, p, deposit, lead_time, nights, price_thb, hotel, segment,
-                          country, arrival)
         cancel = p >= 0.5
         if cancel:
             face, txt, color, sub = "😢", "ยกเลิก", "#ff4d6d", "โอ๊ะโอ! ลูกค้าคนนี้น่าจะยกเลิกการจอง"
@@ -352,10 +321,12 @@ with right:
           <div class="face">{face}</div>
           <div class="verdict" style="color:{color}">{txt}</div>
           <div class="vsub">{sub}</div>
-          <div style="text-align:left;color:#3b2a5c;font-weight:500">🎯 โอกาสยกเลิก</div>
-          <div class="meter"><div style="width:{max(p, 0.001) * 100:.1f}%;background:{bar}">{p:.0%}</div></div>
-          <div class="scale"><span>😊 มาแน่</span><span>🤷 ครึ่งๆ</span><span>😢 ยกเลิกแน่</span></div>
-          <div class="why"><div class="why-t">💡 ทำไมถึงทายแบบนี้?</div>{reasons}</div>
+          <div class="odds">
+            <div class="o stay"><span>😊 มาพักจริง</span><b>{1 - p:.0%}</b></div>
+            <div class="o cxl"><span>😢 ยกเลิก</span><b>{p:.0%}</b></div>
+          </div>
+          <div class="split"><div style="width:{(1 - p) * 100:.1f}%" class="g"></div><div class="r"></div></div>
+          <div class="scale"><span>ลูกค้า 100 คนแบบนี้ มาพักประมาณ {round((1 - p) * 100)} คน</span></div>
           <div class="chips">
             <span class="chip">{HOTEL_TH[hotel]}</span>
             <span class="chip">{COUNTRY_FLAG[country]} {COUNTRY_TH[country]}</span>
