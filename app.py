@@ -275,15 +275,14 @@ with left:
         hotel = c1.selectbox("🏠 ประเภทที่พัก", list(HOTEL_TH), format_func=HOTEL_TH.get)
         arrival = c2.date_input("📅 วันที่เข้าพัก", dt.date.today() + dt.timedelta(days=30), format="DD/MM/YYYY")
         c1, c2 = st.columns(2)
-        nights = c1.number_input("🌙 จำนวนคืนที่เข้าพัก", 1, 14, value=None, placeholder="เช่น 3")
-        price_thb = c2.number_input("💰 ราคาห้องต่อคืน (บาท)", 1000, 15000, value=None, step=100,
-                                    placeholder="เช่น 3500",
+        nights = c1.number_input("🌙 จำนวนคืนที่เข้าพัก", 1, 14, 3)
+        price_thb = c2.number_input("💰 ราคาห้องต่อคืน (บาท)", 1000, 15000, 3500, step=100,
                                     help="ราคาห้องจริงในข้อมูลอยู่ระหว่างประมาณ 1,000–15,000 บาท/คืน")
         st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
 
         section("s2", "📝", "ข้อมูลการจอง", "จองยังไง มัดจำไหม และมาจากประเทศอะไร")
         c1, c2 = st.columns(2)
-        lead_time = c1.number_input("⏰ จองล่วงหน้า (วัน)", 0, 700, value=None, placeholder="เช่น 60")
+        lead_time = c1.number_input("⏰ จองล่วงหน้า (วัน)", 0, 700, 60)
         deposit = c2.selectbox("💳 ประเภทเงินมัดจำ", list(DEPOSIT_TH), format_func=DEPOSIT_TH.get)
         c1, c2 = st.columns(2)
         segment = c1.selectbox("🛒 ช่องทางการจอง", list(SEGMENT_TH), format_func=SEGMENT_TH.get)
@@ -294,11 +293,6 @@ with left:
         submitted = st.form_submit_button("🔮  ทายเลย!", use_container_width=True)
 
 with right:
-    missing = [name for name, v in [("จำนวนคืนที่เข้าพัก", nights), ("ราคาห้องต่อคืน", price_thb),
-                                    ("จองล่วงหน้า", lead_time)] if v is None]
-    if submitted and missing:
-        st.warning("⚠️ กรุณากรอก: " + ", ".join(missing))
-        submitted = False
     if not submitted:
         st.markdown("""<div class="card wait"><div class="big">🤔</div>
           <h3>ลูกค้าจะมาไหมนะ?</h3><p>กรอกข้อมูลแล้วให้ AI ช่วยทาย</p>
