@@ -313,12 +313,12 @@ with right:
         if cancel:
             face, txt, color, sub = "😢", "ยกเลิก", "#ff4d6d", "โอ๊ะโอ! ลูกค้าคนนี้น่าจะยกเลิกการจอง"
             bar = "repeating-linear-gradient(45deg,#ff4d6d 0 14px,#ff7a90 14px 28px)"
-            m_icon, m_label, m_sign = "📉", "รายได้ที่สูญเสีย",
+            m_icon, m_label, m_sign = "💸", "รายได้ที่สูญเสีย", ""
             m_bg = "linear-gradient(120deg, #ffe3e8, #fff0f3)"
         else:
             face, txt, color, sub = "🥳", "ไม่ยกเลิก", "#12b76a", "เย้! ลูกค้าคนนี้น่าจะมาพักจริง"
             bar = "repeating-linear-gradient(45deg,#3ddc97 0 14px,#6ee7b7 14px 28px)"
-            m_icon, m_label, m_sign = "📈", "รายได้ที่จะได้รับ", 
+            m_icon, m_label, m_sign = "💰", "รายได้ที่จะได้รับ", ""
             m_bg = "linear-gradient(120deg, #e3fbef, #effcf5)"
         checkout = arrival + dt.timedelta(days=nights)
         st.markdown(f"""<div class="card">
@@ -340,7 +340,7 @@ with right:
           </div>
           <div class="money" style="background:{m_bg}">
             <span>{m_icon} {m_label}<br>{nights} คืน × ฿{price_thb:,}</span>
-            <b style="color:{color}">{m_sign}฿{price_thb * nights:,}</b></div>
+            <b style="color:{color}">฿{price_thb * nights:,}</b></div>
         </div>""", unsafe_allow_html=True)
         if not cancel:
             st.balloons()
