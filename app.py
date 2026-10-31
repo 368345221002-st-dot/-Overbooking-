@@ -1,349 +1,219 @@
 """
-แอปทำนายการยกเลิกการจองห้องพัก (ธีมสนุก สีสันสดใส)
-วิธีรัน:   python -m streamlit run app.py
-ต้องมี hotel_cancellation_overbooking.py และ hotel_bookings.csv อยู่โฟลเดอร์เดียวกัน
-"""
-from __future__ import annotations
+ระบบเว็บทำนายความเสี่ยงการยกเลิกการจองโรงแรม (ฉบับ V5)
 
-import datetime as dt
+โหลด Pipeline ของตัวแบบ WEB5 + HGB ที่บันทึกจากโน้ตบุ๊กการทดลอง
+ซึ่งเป็นไฟล์เดียวกับที่ใช้รายงานผลในบทความ (การพัฒนาระบบเว็บต้นแบบ และรูปที่ 4) คัดลอกจาก Code/V5/results/
+(md5 b53adb8480eb… ตัวอย่าง lead_time=200, adr=100, ผู้ใหญ่ 2 คน, ห้อง A, PRT ได้ 83.2%)
+
+ฟีเจอร์ WEB5 (ค่าดิบ ไม่ต้องสเกลเอง Pipeline จัดการให้):
+    lead_time, adr, FamilySize, reserved_room_type, country
+"""
+
 import os
 
 import joblib
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-import hotel_cancellation_overbooking as core
+st.set_page_config(page_title="Hotel Booking Cancellation", page_icon="🏨", layout="centered")
 
-st.set_page_config(page_title="ทายใจนักท่องเที่ยว", page_icon="🏨", layout="wide",
-                   initial_sidebar_state="collapsed")
-
+# ---------------- ค่าคงที่ ----------------
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-OUT_DIR = os.path.join(APP_DIR, "outputs")
-BUNDLE_PATH = os.path.join(OUT_DIR, "predict_model_real.joblib")
-DATA_PATH = os.path.join(APP_DIR, "hotel_bookings.csv")
+MODEL_NAME = "hgb_web5_pipeline.joblib"
+MODEL_PATH = os.path.join(APP_DIR, MODEL_NAME)
 
-# ข้อมูลต้นฉบับเก็บราคาเป็นยูโร -> ผู้ใช้กรอกเป็นบาท แล้วระบบแปลงเป็นยูโรก่อนส่งเข้าโมเดล
-# อัตราแลกเปลี่ยนกลาง (XE) ณ 5 ต.ค. 2026: 1 EUR ≈ 37.77 THB  (แก้ตัวเลขนี้ได้ตามอัตราปัจจุบัน)
-EUR_TO_THB = 37.77
+# ขอบบน ADR ที่คำนวณจากชุดฝึก (การเตรียมข้อมูล) — ต้องตรงกับคีย์ data → adr_upper_iqr_train ใน results_data.json
+ADR_CAP = 227.388
 
-# ปรับผลตาม "หลักความเป็นจริงทางธุรกิจ" เรื่องเงินมัดจำ
-# ในข้อมูลชุดนี้ "มัดจำแบบไม่คืนเงิน" ยกเลิกถึง 99% เพราะส่วนใหญ่เป็นการเหมาห้องของบริษัททัวร์
-# ซึ่งไม่ตรงกับพฤติกรรมลูกค้าทั่วไป จึงให้โมเดลทำนายแบบ "ไม่มีมัดจำ" ก่อน แล้วปรับด้วยตัวคูณ odds:
-#   ค่า < 1 = ลดโอกาสยกเลิก, 1 = ไม่ปรับ  (แก้ตัวเลขได้ตามที่ต้องการ)
-DEPOSIT_ODDS = {"No Deposit": 1.0,     # ไม่มีมัดจำ: ใช้ผลโมเดลตามจริง
-                "Refundable": 0.4,     # มัดจำขอคืนได้: มีภาระผูกพันบ้าง -> ยกเลิกน้อยลง
-                "Non Refund": 0.05}    # มัดจำไม่คืนเงิน: ยกเลิกแล้วเสียเงิน -> เข้าพักเกือบแน่นอน
+# เกณฑ์ระดับความเสี่ยงเชิงปฏิบัติ (การแบ่งระดับความเสี่ยง 3 ระดับ)
+T_LOW, T_HIGH = 0.40, 0.60
 
+# ชื่อคอลัมน์ที่ Pipeline ต้องได้รับ (ต้องตรงกับตอนฝึก)
+WEB5_FEATURES = ["lead_time", "adr", "FamilySize", "reserved_room_type", "country"]
 
-def adjust_for_deposit(p: float, deposit: str) -> float:
-    odds = p / max(1 - p, 1e-9) * DEPOSIT_ODDS.get(deposit, 1.0)
-    return odds / (1 + odds)
+# ประเภทห้อง (ชื่อไทย -> รหัสห้องในข้อมูล) เรียงตามระดับราคาเฉลี่ยจากข้อมูล
+ROOM_TYPES = {
+    "ห้องสแตนดาร์ด": "A",
+    "ห้องซูพีเรีย": "D",
+    "ห้องดีลักซ์": "F",
+    "ห้องสวีท": "H",
+}
 
-# ---------------------------------------------------------------- ชื่อภาษาไทย
-HOTEL_TH = {"City Hotel": "🏙️  โรงแรม", "Resort Hotel": "🏝️  รีสอร์ท"}
-DEPOSIT_TH = {"No Deposit": "🙅  ไม่มีเงินมัดจำ", "Non Refund": "🔒  มัดจำแบบไม่คืนเงิน",
-              "Refundable": "💸  มัดจำแบบขอคืนเงินได้"}
-SEGMENT_TH = {"Online TA": "📱  ตัวแทนท่องเที่ยวออนไลน์", "Offline TA/TO": "🧳  บริษัททัวร์ / ตัวแทนท่องเที่ยว",
-              "Direct": "☎️  จองตรงกับโรงแรม", "Groups": "👨‍👩‍👧‍👦  การจองแบบหมู่คณะ",
-              "Corporate": "🏢  องค์กร / บริษัท", "Aviation": "✈️  สายการบิน"}
-COUNTRY_TH = {"PRT": "โปรตุเกส", "GBR": "สหราชอาณาจักร", "FRA": "ฝรั่งเศส", "ESP": "สเปน",
-              "DEU": "เยอรมนี", "ITA": "อิตาลี", "IRL": "ไอร์แลนด์", "BEL": "เบลเยียม",
-              "BRA": "บราซิล", "NLD": "เนเธอร์แลนด์", "THA": "ไทย"}
-COUNTRY_FLAG = {"PRT": "🇵🇹", "GBR": "🇬🇧", "FRA": "🇫🇷", "ESP": "🇪🇸", "DEU": "🇩🇪", "ITA": "🇮🇹",
-                "IRL": "🇮🇪", "BEL": "🇧🇪", "BRA": "🇧🇷", "NLD": "🇳🇱", "THA": "🇹🇭"}
-TH_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
-
-
-# ---------------------------------------------------------------- ตกแต่งหน้าเว็บ
-st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Mali:wght@500;600;700&family=Mitr:wght@300;400;500&family=Noto+Color+Emoji&display=swap');
-:root { --pink:#ff6fae; --orange:#ff9f43; --yellow:#ffd93d; --mint:#3ddc97; --sky:#4cc9f0;
-        --purple:#8b5cf6; --ink:#3b2a5c; --muted:#7c6f99; }
-html, body, .stApp, button, input, label, p, span, div { font-family:'Mitr','Noto Color Emoji',sans-serif !important; }
-h1, h2, h3, .fun { font-family:'Mali','Noto Color Emoji',cursive !important; }
-#MainMenu, header[data-testid="stHeader"], footer, .stDeployButton, [data-testid="stToolbar"],
-[data-testid="InputInstructions"] { display:none !important; }
-
-.stApp { background: linear-gradient(160deg, #fff4fb 0%, #f1f0ff 45%, #e6f8ff 100%); }
-.block-container { padding-top:1.2rem; padding-bottom:2rem; max-width:1180px; }
-
-/* ลอยไปมา */
-.floaty { position:fixed; font-size:2.4rem; opacity:.5; z-index:0; pointer-events:none;
-          animation:float 7s ease-in-out infinite; }
-@keyframes float { 0%,100% { transform:translateY(0) rotate(-4deg); } 50% { transform:translateY(-22px) rotate(6deg); } }
-@keyframes bounce { 0%,100% { transform:translateY(0); } 50% { transform:translateY(-10px); } }
-@keyframes wiggle { 0%,100% { transform:rotate(0); } 25% { transform:rotate(-8deg); } 75% { transform:rotate(8deg); } }
-@keyframes pop { 0% { opacity:0; transform:scale(.85); } 70% { transform:scale(1.03); } 100% { opacity:1; transform:scale(1); } }
-
-/* ---------- hero ---------- */
-.hero { position:relative; z-index:1; border-radius:32px; padding:30px 36px; margin-bottom:24px; color:#fff;
-        background:linear-gradient(120deg, var(--purple) 0%, var(--pink) 55%, var(--orange) 100%);
-        box-shadow:0 14px 0 rgba(139,92,246,.18), 0 24px 40px rgba(255,111,174,.30);
-        display:flex; align-items:center; gap:26px; flex-wrap:wrap; overflow:hidden; }
-.hero::after { content:"⭐  ✨  ⭐"; position:absolute; right:30px; top:16px; font-size:1.4rem; opacity:.75; }
-.hero .mascot { font-size:4.6rem; animation:bounce 2.2s ease-in-out infinite;
-                filter:drop-shadow(0 8px 10px rgba(0,0,0,.18)); }
-.hero h1 { color:#fff; font-size:2.35rem; margin:0; padding:0; line-height:1.25;
-           text-shadow:0 3px 0 rgba(0,0,0,.12); }
-.hero p { margin:6px 0 0; font-size:1.05rem; color:#fff6fb; }
-.pill { display:inline-block; background:#fff; color:var(--pink); font-weight:500; border-radius:99px;
-        padding:3px 14px; font-size:.82rem; margin-bottom:10px; box-shadow:0 4px 0 rgba(0,0,0,.08); }
-
-/* ---------- form ---------- */
-div[data-testid="stForm"] { position:relative; z-index:1; background:#fff; border:3px solid #efe7ff;
-        border-radius:30px; padding:26px 28px 24px; box-shadow:0 10px 0 #ece4ff, 0 22px 40px rgba(139,92,246,.12); }
-.sec { display:flex; align-items:center; gap:12px; margin:2px 0 8px; }
-.sec .num { width:46px; height:46px; border-radius:16px; display:flex; align-items:center; justify-content:center;
-            font-size:1.5rem; animation:wiggle 3s ease-in-out infinite; }
-.sec .t { font-family:'Mali',cursive; font-weight:700; color:var(--ink); font-size:1.3rem; line-height:1.15; }
-.sec .d { font-size:.82rem; color:var(--muted); font-weight:300; }
-.s1 .num { background:#ffe3f0; } .s2 .num { background:#dff6ff; }
-.gap { height:10px; border-bottom:3px dotted #f0e9ff; margin:2px 0 18px; }
-label p { font-size:.95rem !important; color:var(--ink) !important; font-weight:400 !important; }
-div[data-baseweb="select"] > div, div[data-baseweb="input"] {
-        border-radius:16px !important; background:#faf8ff !important; border:2px solid #ebe3ff !important;
-        transition:border-color .15s, box-shadow .15s; }
-div[data-baseweb="select"] > div:hover, div[data-baseweb="input"]:hover,
-div[data-baseweb="input"]:focus-within { border-color:var(--purple) !important;
-        box-shadow:0 0 0 4px rgba(139,92,246,.12); }
-div[data-baseweb="input"] input { background:transparent !important; }
-button[data-testid="stNumberInputStepUp"], button[data-testid="stNumberInputStepDown"] {
-        border-radius:12px !important; color:var(--purple) !important; }
-
-div[data-testid="stFormSubmitButton"] button { height:3.8rem; border-radius:22px; border:none;
-        background:linear-gradient(90deg, var(--mint), var(--sky)); box-shadow:0 8px 0 #22a6a0;
-        transition:transform .12s, box-shadow .12s; }
-div[data-testid="stFormSubmitButton"] button:hover { transform:translateY(-2px); box-shadow:0 10px 0 #22a6a0; }
-div[data-testid="stFormSubmitButton"] button:active { transform:translateY(6px); box-shadow:0 2px 0 #22a6a0; }
-div[data-testid="stFormSubmitButton"] button p { color:#fff !important; font-family:'Mali',cursive !important;
-        font-size:1.4rem !important; font-weight:700 !important; text-shadow:0 2px 0 rgba(0,0,0,.12); }
-
-/* ---------- result ---------- */
-.card { position:relative; z-index:1; background:#fff; border:3px solid #efe7ff; border-radius:30px;
-        padding:26px; text-align:center; box-shadow:0 10px 0 #ece4ff, 0 22px 40px rgba(139,92,246,.12);
-        animation:pop .5s ease; }
-.wait .big { font-size:5rem; animation:bounce 2s ease-in-out infinite; }
-.wait h3 { color:var(--ink); margin:6px 0 4px; font-size:1.6rem; }
-.wait p { color:var(--muted); margin:0 0 18px; }
-.steps { text-align:left; display:grid; gap:10px; }
-.step { display:flex; gap:12px; align-items:center; border-radius:18px; padding:12px 14px; color:var(--ink); }
-.step i { font-style:normal; font-size:1.5rem; }
-.st1 { background:#fff0f7; } .st2 { background:#eef9ff; } .st3 { background:#effcf5; }
-
-.face { font-size:5.2rem; line-height:1; animation:bounce 1.8s ease-in-out infinite; }
-.verdict { font-family:'Mali',cursive; font-size:2.3rem; font-weight:700; margin:8px 0 0; }
-.vsub { color:var(--muted); margin-bottom:16px; }
-.meter { position:relative; height:30px; border-radius:99px; overflow:hidden; margin:6px 0 6px;
-         background:#f2eefc; border:3px solid #ebe3ff; }
-.meter > div { height:100%; border-radius:99px; display:flex; align-items:center; justify-content:flex-end;
-               padding-right:12px; color:#fff; font-weight:500; font-size:.95rem; min-width:56px;
-               background-size:28px 28px !important; animation:grow 1s ease; }
-@keyframes grow { from { width:0; } }
-.scale { display:flex; justify-content:space-between; font-size:.8rem; color:var(--muted); margin-bottom:16px; }
-.chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-bottom:14px; }
-.chip { background:#f7f4ff; border-radius:99px; padding:6px 12px; font-size:.86rem; color:var(--ink); }
-.money { border-radius:22px; padding:14px 18px; background:linear-gradient(120deg, #fff6d6, #ffe9f3);
-         display:flex; justify-content:space-between; align-items:center; }
-.money span { color:var(--muted); font-size:.88rem; text-align:left; }
-.money b { font-family:'Mali',cursive; color:#e8590c; font-size:1.7rem; }
-.odds { display:flex; gap:10px; margin:4px 0 10px; }
-.o { flex:1; border-radius:18px; padding:10px 12px; text-align:left; }
-.o span { display:block; font-size:.88rem; color:var(--ink); }
-.o b { font-family:'Mali',cursive; font-size:2rem; line-height:1.1; }
-.o.stay { background:#e7f9ef; } .o.stay b { color:#12b76a; }
-.o.cxl { background:#ffeef1; } .o.cxl b { color:#ff4d6d; }
-.split { display:flex; height:22px; border-radius:99px; overflow:hidden; border:3px solid #ebe3ff; margin-bottom:6px; }
-.split .g { background:repeating-linear-gradient(45deg,#3ddc97 0 14px,#6ee7b7 14px 28px); animation:grow 1s ease; }
-.split .r { flex:1; background:repeating-linear-gradient(45deg,#ff4d6d 0 14px,#ff7a90 14px 28px); }
-.scale { justify-content:center !important; }
-.foot { text-align:center; color:var(--muted); font-size:.82rem; margin-top:26px; }
-</style>
-<div class="floaty" style="left:2%;top:18%">☁️</div>
-<div class="floaty" style="right:3%;top:42%;animation-delay:1.5s">🎈</div>
-<div class="floaty" style="left:3%;bottom:10%;animation-delay:3s">🌴</div>
-<div class="floaty" style="right:6%;bottom:6%;animation-delay:2s">✈️</div>
-""", unsafe_allow_html=True)
+# 10 ประเทศที่พบมากที่สุดในข้อมูล (ชื่อไทย -> รหัส ISO)
+# "อื่น ๆ" ส่งรหัสที่ไม่อยู่ใน 10 อันดับ Pipeline จะจัดเข้าหมวด "อื่น ๆ" เอง
+OTHER_LABEL = "อื่น ๆ (Other)"
+OTHER_CODE = "OTHER"
+COUNTRIES = {
+    "โปรตุเกส": "PRT",
+    "สหราชอาณาจักร": "GBR",
+    "ฝรั่งเศส": "FRA",
+    "สเปน": "ESP",
+    "เยอรมนี": "DEU",
+    "อิตาลี": "ITA",
+    "ไอร์แลนด์": "IRL",
+    "เบลเยียม": "BEL",
+    "บราซิล": "BRA",
+    "เนเธอร์แลนด์": "NLD",
+    OTHER_LABEL: OTHER_CODE,
+}
 
 
-# ---------------------------------------------------------------- โมเดล
-# โมเดลนี้เรียนรู้จาก "ข้อมูลที่ผู้ใช้กรอกได้จริงเท่านั้น" (ไม่มีค่าซ่อนที่เดาให้)
-# และเรียนจากการจองแบบ "ไม่มีมัดจำ" เท่านั้น แล้วค่อยปรับตามประเภทมัดจำด้วยกฎธุรกิจ (DEPOSIT_ODDS)
-# เพื่อตัดความเอนเอียงของข้อมูล (มัดจำไม่คืนเงินในข้อมูลชุดนี้ = บริษัททัวร์เหมาห้องแล้วยกเลิก 99%)
-FEATS = ["hotel", "market_segment", "country", "arrival_month", "lead_time", "nights", "weekend_nights", "adr"]
-CATS = ["hotel", "market_segment", "country"]
-MONO = [0, 0, 0, 0, 1, 0, 0, 0]   # จองล่วงหน้านานขึ้น -> โอกาสยกเลิกต้องไม่ลดลง (ตามสามัญสำนึก)
+# ---------------- โหลดตัวแบบ ----------------
+@st.cache_resource
+def load_model(path):
+    return joblib.load(path)
 
 
-def make_X(df: pd.DataFrame, cats: dict) -> pd.DataFrame:
-    X = pd.DataFrame({
-        "hotel": df["hotel"], "market_segment": df["market_segment"],
-        "country": df["country"].where(df["country"].isin(COUNTRY_TH), "OTHER"),
-        "arrival_month": df["arrival_month"].astype(int), "lead_time": df["lead_time"].astype(float),
-        "nights": df["nights"].astype(float), "weekend_nights": df["weekend_nights"].astype(float),
-        "adr": df["adr"].astype(float)})
-    for c in CATS:
-        X[c] = pd.Categorical(X[c], categories=cats[c])
-    return X[FEATS]
-
-
-def _logit(p):
-    p = np.clip(np.asarray(p, float), 1e-6, 1 - 1e-6)
-    return np.log(p / (1 - p))
-
-
-def calibrate(p, a: float, b: float):
-    """Platt scaling: ปรับความน่าจะเป็นให้ตรงกับอัตรายกเลิกจริง (เส้นโค้งเรียบ)"""
-    return 1 / (1 + np.exp(-(a * _logit(p) + b)))
-
-
-@st.cache_resource(show_spinner="🧠 กำลังสอนให้ระบบฉลาด (ครั้งแรกประมาณ 30 วินาที)...")
-def load_model() -> dict:
-    import lightgbm as lgb
-    from sklearn.metrics import roc_auc_score
-    os.makedirs(OUT_DIR, exist_ok=True)
-    s = os.stat(DATA_PATH)
-    sig = (s.st_size, int(s.st_mtime))
-    if os.path.exists(BUNDLE_PATH):
-        try:
-            m = joblib.load(BUNDLE_PATH)
-            if m.get("signature") == sig:
-                return m
-        except Exception:
-            pass
-    df = core.load_and_clean(DATA_PATH)
-    df = df[(df["deposit_type"] == "No Deposit") & (df["adr"] > 0)
-            & df["market_segment"].isin(SEGMENT_TH)].copy()
-    df["nights"] = (df["stays_in_weekend_nights"] + df["stays_in_week_nights"]).clip(lower=1)
-    df["weekend_nights"] = df["stays_in_weekend_nights"]
-    df["arrival_month"] = df["arrival_month_num"]
-    cats = {"hotel": list(HOTEL_TH), "market_segment": list(SEGMENT_TH), "country": list(COUNTRY_TH) + ["OTHER"]}
-
-    train = df[df.arrival_date < "2017-01-01"]
-    calib = df[(df.arrival_date >= "2017-01-01") & (df.arrival_date < "2017-05-01")]
-    test = df[df.arrival_date >= "2017-05-01"]
-    # max_depth=1 = โมเดลแบบบวกกัน (additive): แต่ละปัจจัยมีผลแยกกันชัดเจน อธิบายได้ตรงไปตรงมา
-    # และให้ผลที่สมเหตุสมผลกว่าโมเดลซับซ้อน (ความแม่นยำใกล้เคียงกัน)
-    clf = lgb.LGBMClassifier(n_estimators=600, learning_rate=0.05, max_depth=1, num_leaves=2,
-                             min_child_samples=200, monotone_constraints=MONO, random_state=42, verbose=-1)
-    clf.fit(make_X(train, cats), train[core.TARGET])
-    from sklearn.linear_model import LogisticRegression
-    z = _logit(clf.predict_proba(make_X(calib, cats))[:, 1]).reshape(-1, 1)
-    lr = LogisticRegression(C=1e6).fit(z, calib[core.TARGET])
-    cal = (float(lr.coef_[0][0]), float(lr.intercept_[0]))
-    p_test = calibrate(clf.predict_proba(make_X(test, cats))[:, 1], *cal)
-    y = test[core.TARGET].values
-    m = dict(signature=sig, clf=clf, cal=cal, cats=cats,
-             accuracy=float(((p_test >= 0.5) == y).mean()), auc=float(roc_auc_score(y, p_test)))
-    joblib.dump(m, BUNDLE_PATH)
-    return m
-
-
-def predict(m: dict, row: dict) -> float:
-    """คืนค่าโอกาสยกเลิก (0–1)"""
-    X = make_X(pd.DataFrame([row]), m["cats"])
-    return float(calibrate(m["clf"].predict_proba(X)[:, 1], *m["cal"])[0])
-
-
-def thai_date(d: dt.date) -> str:
-    return f"{d.day} {TH_MONTHS[d.month - 1]} {d.year + 543}"
-
-
-def section(cls: str, icon: str, title: str, desc: str) -> None:
-    st.markdown(f'<div class="sec {cls}"><div class="num">{icon}</div><div><div class="t">{title}</div>'
-                f'<div class="d">{desc}</div></div></div>', unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------------- หน้าเว็บ
-if not os.path.exists(DATA_PATH):
-    st.error("ไม่พบไฟล์ hotel_bookings.csv ในโฟลเดอร์เดียวกับ app.py")
+if not os.path.isfile(MODEL_PATH):
+    st.error(f"ไม่พบไฟล์ตัวแบบ {MODEL_NAME} — วางไว้โฟลเดอร์เดียวกับ app.py")
     st.stop()
-model = load_model()
 
-st.markdown(f"""<div class="hero"><div class="mascot">🏨</div>
-    <h1>การพยากรณ์การยกเลิกการจองห้องพัก</h1>
-    <p>ลูกค้าคนนี้จะมาพักจริง 🧳 หรือจะยกเลิกการจอง 🙅 มาลองทายกันเลย!</p></div></div>""",
-            unsafe_allow_html=True)
+model = load_model(MODEL_PATH)
 
-left, right = st.columns([1.5, 1], gap="large")
+# ตรวจว่าไฟล์ที่โหลดเป็น Pipeline ที่รับฟีเจอร์ WEB5 จริง ไม่ใช่ตัวแบบรุ่นเก่า
+model_features = list(getattr(model, "feature_names_in_", []))
+if sorted(model_features) != sorted(WEB5_FEATURES):
+    st.error(
+        "ไฟล์ตัวแบบไม่ใช่ Pipeline WEB5 — คอลัมน์ที่ตัวแบบต้องการคือ "
+        f"{model_features} แต่ระบบส่ง {WEB5_FEATURES}"
+    )
+    st.stop()
 
-with left:
-    with st.form("predict", border=False):
-        section("s1", "🛏️", "ข้อมูลการเข้าพัก", "เลือกที่พัก วันที่ และราคาห้อง")
-        c1, c2 = st.columns(2)
-        hotel = c1.selectbox("🏠 ประเภทที่พัก", list(HOTEL_TH), format_func=HOTEL_TH.get)
-        arrival = c2.date_input("📅 วันที่เข้าพัก", dt.date.today() + dt.timedelta(days=30), format="DD/MM/YYYY")
-        c1, c2 = st.columns(2)
-        nights = c1.number_input("🌙 จำนวนคืนที่เข้าพัก", 1, 14, 3)
-        price_thb = c2.number_input("💰 ราคาห้องต่อคืน (บาท)", 1000, 15000, 3500, step=100,
-                                    help="ราคาห้องจริงในข้อมูลอยู่ระหว่างประมาณ 1,000–15,000 บาท/คืน")
-        st.markdown('<div class="gap"></div>', unsafe_allow_html=True)
+CANCEL_INDEX = list(model.classes_).index(1)
 
-        section("s2", "📝", "ข้อมูลการจอง", "จองยังไง มัดจำไหม และมาจากประเทศอะไร")
-        c1, c2 = st.columns(2)
-        lead_time = c1.number_input("⏰ จองล่วงหน้า (วัน)", 0, 700, 60)
-        deposit = c2.selectbox("💳 ประเภทเงินมัดจำ", list(DEPOSIT_TH), format_func=DEPOSIT_TH.get)
-        c1, c2 = st.columns(2)
-        segment = c1.selectbox("🛒 ช่องทางการจอง", list(SEGMENT_TH), format_func=SEGMENT_TH.get)
-        country = c2.selectbox("🌍 ประเทศของลูกค้า", list(COUNTRY_TH),
-                               format_func=lambda c: f"{COUNTRY_FLAG[c]}  {COUNTRY_TH[c]}")
 
-        st.write("")
-        submitted = st.form_submit_button("🔮  ทายเลย!", use_container_width=True)
+def risk_level(p):
+    """แบ่งระดับความเสี่ยงตามเกณฑ์ในหัวข้อการแบ่งระดับความเสี่ยง 3 ระดับ"""
+    if p >= T_HIGH:
+        return "cancel", "🔴", "ความเสี่ยงสูง", "ควรติดต่อยืนยันการจอง หรือพิจารณาในการวางแผนรับจองเกิน"
+    if p <= T_LOW:
+        return "keep", "🟢", "ความเสี่ยงต่ำ", "มีแนวโน้มเข้าพักตามที่จอง"
+    return "warn", "🟡", "ความเสี่ยงปานกลาง", "ควรติดตามการจองนี้ใกล้ชิด"
 
-with right:
-    if not submitted:
-        st.markdown("""<div class="card wait"><div class="big">🤔</div>
-          <h3>ลูกค้าจะมาไหมนะ?</h3><p>กรอกข้อมูลแล้วให้ AI ช่วยทาย</p>
-          <div class="steps">
-            <div class="step st1"><i>✏️</i>กรอกข้อมูลการจองทางซ้าย</div>
-            <div class="step st2"><i>👆</i>กดปุ่ม <b>&nbsp;ทายเลย!</b></div>
-            <div class="step st3"><i>🎉</i>ดูผลว่าลูกค้าจะมาหรือยกเลิก</div>
-          </div></div>""", unsafe_allow_html=True)
-    else:
-        stay_dates = [arrival + dt.timedelta(days=i) for i in range(nights)]
-        weekend = sum(d.weekday() >= 5 for d in stay_dates)
-        p_base = predict(model, dict(
-            hotel=hotel, market_segment=segment, country=country, arrival_month=arrival.month,
-            lead_time=lead_time, nights=nights, weekend_nights=weekend,
-            adr=price_thb / EUR_TO_THB))                    # บาท -> ยูโร ก่อนเข้าโมเดล
-        p = adjust_for_deposit(p_base, deposit)
-        cancel = p >= 0.5
-        if cancel:
-            face, txt, color, sub = "😢", "ยกเลิก", "#ff4d6d", "โอ๊ะโอ! ลูกค้าคนนี้น่าจะยกเลิกการจอง"
-            bar = "repeating-linear-gradient(45deg,#ff4d6d 0 14px,#ff7a90 14px 28px)"
-            m_icon, m_label, m_sign = "💸", "รายได้ที่สูญเสีย", ""
-            m_bg = "linear-gradient(120deg, #ffe3e8, #fff0f3)"
-        else:
-            face, txt, color, sub = "🥳", "ไม่ยกเลิก", "#12b76a", "เย้! ลูกค้าคนนี้น่าจะมาพักจริง"
-            bar = "repeating-linear-gradient(45deg,#3ddc97 0 14px,#6ee7b7 14px 28px)"
-            m_icon, m_label, m_sign = "💰", "รายได้ที่จะได้รับ", ""
-            m_bg = "linear-gradient(120deg, #e3fbef, #effcf5)"
-        checkout = arrival + dt.timedelta(days=nights)
-        st.markdown(f"""<div class="card">
-          <div class="face">{face}</div>
-          <div class="verdict" style="color:{color}">{txt}</div>
-          <div class="vsub">{sub}</div>
-          <div class="odds">
-            <div class="o stay"><span>😊 มาพักจริง</span><b>{1 - p:.0%}</b></div>
-            <div class="o cxl"><span>😢 ยกเลิก</span><b>{p:.0%}</b></div>
-          </div>
-          <div class="split"><div style="width:{(1 - p) * 100:.1f}%" class="g"></div><div class="r"></div></div>
-          <div class="scale"><span>ลูกค้า 100 คนแบบนี้ มาพักประมาณ {round((1 - p) * 100)} คน</span></div>
-          <div class="chips">
-            <span class="chip">{HOTEL_TH[hotel]}</span>
-            <span class="chip">{COUNTRY_FLAG[country]} {COUNTRY_TH[country]}</span>
-            <span class="chip">📅 {thai_date(arrival)} – {thai_date(checkout)}</span>
-            <span class="chip">{SEGMENT_TH[segment]}</span>
-            <span class="chip">{DEPOSIT_TH[deposit]}</span>
-          </div>
-          <div class="money" style="background:{m_bg}">
-            <span>{m_icon} {m_label}<br>{nights} คืน × ฿{price_thb:,}</span>
-            <b style="color:{color}">฿{price_thb * nights:,}</b></div>
-        </div>""", unsafe_allow_html=True)
-        if not cancel:
-            st.balloons()
 
-st.markdown('<div class="foot">🏨 ทายใจนักท่องเที่ยว · ระบบทำนายการยกเลิกการจองห้องพักด้วย AI</div>',
-            unsafe_allow_html=True)
+# ---------------- สไตล์ ----------------
+st.markdown(
+    """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;600;700&display=swap');
+html, body, [class*="css"], .stMarkdown, .stButton button, label, input {
+    font-family: 'Prompt', sans-serif !important;
+}
+.block-container { padding-top: 3rem; max-width: 760px; }
+#MainMenu, footer, header [data-testid="stToolbar"] { visibility: hidden; }
+
+.hero {
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #38bdf8 100%);
+    border-radius: 20px; padding: 28px 32px; color: #fff; margin-bottom: 24px;
+    box-shadow: 0 10px 30px rgba(37, 99, 235, .25);
+}
+.hero h1 { color: #fff; font-size: 1.9rem; font-weight: 700; margin: 0; padding: 0; }
+.hero p  { color: #dbeafe; margin: 6px 0 0; font-weight: 300; }
+
+.section { font-weight: 600; font-size: 1.05rem; margin: 6px 0 2px; }
+
+[data-testid="stForm"] {
+    border: 1px solid rgba(148, 163, 184, .35); border-radius: 18px;
+    padding: 22px 24px 14px; box-shadow: 0 4px 18px rgba(15, 23, 42, .06);
+}
+.stFormSubmitButton button {
+    background: linear-gradient(135deg, #2563eb, #0ea5e9); color: #fff; border: 0;
+    border-radius: 12px; padding: .7rem 0; font-size: 1.05rem; font-weight: 600;
+}
+.stFormSubmitButton button:hover { filter: brightness(1.08); color: #fff; }
+
+.result {
+    border-radius: 18px; padding: 24px 28px; margin-top: 24px; color: #fff;
+    display: flex; align-items: center; gap: 22px;
+}
+.result.cancel { background: linear-gradient(135deg, #b91c1c, #ef4444); }
+.result.keep   { background: linear-gradient(135deg, #047857, #10b981); }
+.result.warn   { background: linear-gradient(135deg, #b45309, #f59e0b); }
+.result .icon  { font-size: 3rem; line-height: 1; }
+.result .label { font-size: .95rem; opacity: .9; }
+.result .title { font-size: 1.6rem; font-weight: 700; }
+.result .advice { font-size: .95rem; margin-top: 2px; }
+.bar { background: rgba(255,255,255,.3); border-radius: 99px; height: 10px; margin-top: 10px; }
+.bar > div { background: #fff; height: 100%; border-radius: 99px; }
+.pct { font-size: .95rem; margin-top: 6px; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    """
+<div class="hero">
+  <h1>🏨 ประเมินความเสี่ยงการยกเลิกการจอง</h1>
+  <p>กรอกข้อมูลการจอง แล้วให้ตัวแบบประเมินโอกาสที่ลูกค้าจะยกเลิก</p>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ---------------- ฟอร์ม ----------------
+with st.form("booking"):
+    st.markdown('<div class="section">📅 ข้อมูลการจอง</div>', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    lead_time = c1.number_input("จองล่วงหน้า (วัน)", min_value=0, max_value=737, value=30)
+    adr = c2.number_input("ราคาเฉลี่ยต่อคืน (ADR)", min_value=0.0, value=100.0, step=5.0)
+
+    st.markdown('<div class="section">👨‍👩‍👧 จำนวนผู้เข้าพัก</div>', unsafe_allow_html=True)
+    c3, c4, c5 = st.columns(3)
+    adults = c3.number_input("ผู้ใหญ่", 0, 60, 2)
+    children = c4.number_input("เด็ก", 0, 10, 0)
+    babies = c5.number_input("ทารก", 0, 10, 0)
+
+    st.markdown('<div class="section">🛏️ ห้องพักและสัญชาติ</div>', unsafe_allow_html=True)
+    c6, c7 = st.columns(2)
+    room_label = c6.selectbox("ประเภทห้อง", list(ROOM_TYPES))
+    country_label = c7.selectbox("ประเทศ", list(COUNTRIES), index=0)
+
+    submitted = st.form_submit_button("🔮 ทำนายผล", use_container_width=True)
+
+# ---------------- ทำนาย ----------------
+if submitted:
+    family_size = adults + children + babies
+    if family_size == 0:
+        st.warning("กรุณาระบุจำนวนผู้เข้าพักอย่างน้อย 1 คน")
+        st.stop()
+
+    # จำกัด ADR ไม่เกินขอบบนจากชุดฝึก แล้วส่งค่าดิบให้ Pipeline (หัวข้อการพัฒนาระบบเว็บต้นแบบ)
+    adr_used = min(float(adr), ADR_CAP)
+
+    X = pd.DataFrame(
+        [{
+            "lead_time": float(lead_time),
+            "adr": adr_used,
+            "FamilySize": float(family_size),
+            "reserved_room_type": ROOM_TYPES[room_label],
+            "country": COUNTRIES[country_label],
+        }]
+    )[model_features]
+
+    p_cancel = float(model.predict_proba(X)[0][CANCEL_INDEX])
+    cls, icon, title, advice = risk_level(p_cancel)
+
+    st.markdown(
+        f"""
+<div class="result {cls}">
+  <div class="icon">{icon}</div>
+  <div style="flex:1">
+    <div class="label">ผลการประเมิน</div>
+    <div class="title">{title}</div>
+    <div class="advice">{advice}</div>
+    <div class="bar"><div style="width:{p_cancel*100:.1f}%"></div></div>
+    <div class="pct">โอกาสยกเลิก {p_cancel:.1%}</div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    if adr > ADR_CAP:
+        st.caption(f"ราคาเกิน {ADR_CAP:,.3f} ระบบใช้ค่า {ADR_CAP:,.3f} ในการคำนวณ (ขอบบนจากชุดฝึก)")
+
+    st.caption(
+        f"ระดับความเสี่ยง: ต่ำ (≤ {T_LOW:.2f}) · ปานกลาง · สูง (≥ {T_HIGH:.2f}) — "
+        "ระดับสูงหมายถึงโอกาสยกเลิกสูงกว่าค่าเฉลี่ย ไม่ได้หมายความว่าจะยกเลิกแน่นอน"
+    )
