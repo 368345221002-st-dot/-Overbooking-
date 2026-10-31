@@ -1,5 +1,5 @@
 """
-ระบบเว็บทำนายความเสี่ยงการยกเลิกการจองโรงแรม (ฉบับ V5)
+ระบบเว็บทำนายความเสี่ยงการยกเลิกการจองโรงแรม (ฉบับ V5 หน้าจอภาษาอังกฤษตามข้อกำหนดรูปของวารสาร JCCT)
 
 โหลด Pipeline ของตัวแบบ WEB5 + HGB ที่บันทึกจากโน้ตบุ๊กการทดลอง
 ซึ่งเป็นไฟล์เดียวกับที่ใช้รายงานผลในบทความ (การพัฒนาระบบเว็บต้นแบบ และรูปที่ 4) คัดลอกจาก Code/V5/results/
@@ -15,7 +15,7 @@ import joblib
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Hotel Booking Cancellation", page_icon="🏨", layout="centered")
+st.set_page_config(page_title="Cancellation Risk Levels for Hotel Overbooking", page_icon="🏨", layout="centered")
 
 # ---------------- ค่าคงที่ ----------------
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -31,29 +31,29 @@ T_LOW, T_HIGH = 0.40, 0.60
 # ชื่อคอลัมน์ที่ Pipeline ต้องได้รับ (ต้องตรงกับตอนฝึก)
 WEB5_FEATURES = ["lead_time", "adr", "FamilySize", "reserved_room_type", "country"]
 
-# ประเภทห้อง (ชื่อไทย -> รหัสห้องในข้อมูล) เรียงตามระดับราคาเฉลี่ยจากข้อมูล
+# ประเภทห้อง (ชื่อที่แสดง -> รหัสห้องในข้อมูล) เรียงตามระดับราคาเฉลี่ยจากข้อมูล
 ROOM_TYPES = {
-    "ห้องสแตนดาร์ด": "A",
-    "ห้องซูพีเรีย": "D",
-    "ห้องดีลักซ์": "F",
-    "ห้องสวีท": "H",
+    "Standard": "A",
+    "Superior": "D",
+    "Deluxe": "F",
+    "Suite": "H",
 }
 
-# 10 ประเทศที่พบมากที่สุดในข้อมูล (ชื่อไทย -> รหัส ISO)
-# "อื่น ๆ" ส่งรหัสที่ไม่อยู่ใน 10 อันดับ Pipeline จะจัดเข้าหมวด "อื่น ๆ" เอง
-OTHER_LABEL = "อื่น ๆ (Other)"
+# 10 ประเทศที่พบมากที่สุดในข้อมูล (ชื่อที่แสดง -> รหัส ISO)
+# "Other" ส่งรหัสที่ไม่อยู่ใน 10 อันดับ Pipeline จะจัดเข้าหมวด "อื่น ๆ" เอง
+OTHER_LABEL = "Other"
 OTHER_CODE = "OTHER"
 COUNTRIES = {
-    "โปรตุเกส": "PRT",
-    "สหราชอาณาจักร": "GBR",
-    "ฝรั่งเศส": "FRA",
-    "สเปน": "ESP",
-    "เยอรมนี": "DEU",
-    "อิตาลี": "ITA",
-    "ไอร์แลนด์": "IRL",
-    "เบลเยียม": "BEL",
-    "บราซิล": "BRA",
-    "เนเธอร์แลนด์": "NLD",
+    "Portugal": "PRT",
+    "United Kingdom": "GBR",
+    "France": "FRA",
+    "Spain": "ESP",
+    "Germany": "DEU",
+    "Italy": "ITA",
+    "Ireland": "IRL",
+    "Belgium": "BEL",
+    "Brazil": "BRA",
+    "Netherlands": "NLD",
     OTHER_LABEL: OTHER_CODE,
 }
 
@@ -65,7 +65,7 @@ def load_model(path):
 
 
 if not os.path.isfile(MODEL_PATH):
-    st.error(f"ไม่พบไฟล์ตัวแบบ {MODEL_NAME} — วางไว้โฟลเดอร์เดียวกับ app.py")
+    st.error(f"Model file {MODEL_NAME} not found. Place it in the same folder as app.py.")
     st.stop()
 
 model = load_model(MODEL_PATH)
@@ -74,8 +74,8 @@ model = load_model(MODEL_PATH)
 model_features = list(getattr(model, "feature_names_in_", []))
 if sorted(model_features) != sorted(WEB5_FEATURES):
     st.error(
-        "ไฟล์ตัวแบบไม่ใช่ Pipeline WEB5 — คอลัมน์ที่ตัวแบบต้องการคือ "
-        f"{model_features} แต่ระบบส่ง {WEB5_FEATURES}"
+        "The model file is not the WEB5 pipeline. The model expects "
+        f"{model_features} but the app sends {WEB5_FEATURES}"
     )
     st.stop()
 
@@ -85,10 +85,10 @@ CANCEL_INDEX = list(model.classes_).index(1)
 def risk_level(p):
     """แบ่งระดับความเสี่ยงตามเกณฑ์ในหัวข้อการแบ่งระดับความเสี่ยง 3 ระดับ"""
     if p >= T_HIGH:
-        return "cancel", "🔴", "ความเสี่ยงสูง", "ควรติดต่อยืนยันการจอง หรือพิจารณาในการวางแผนรับจองเกิน"
+        return "cancel", "🔴", "High risk", "Contact the guest to confirm the booking, or consider it when planning overbooking."
     if p <= T_LOW:
-        return "keep", "🟢", "ความเสี่ยงต่ำ", "มีแนวโน้มเข้าพักตามที่จอง"
-    return "warn", "🟡", "ความเสี่ยงปานกลาง", "ควรติดตามการจองนี้ใกล้ชิด"
+        return "keep", "🟢", "Low risk", "The guest is likely to arrive as booked."
+    return "warn", "🟡", "Medium risk", "Monitor this booking closely."
 
 
 # ---------------- สไตล์ ----------------
@@ -107,7 +107,7 @@ html, body, [class*="css"], .stMarkdown, .stButton button, label, input {
     border-radius: 20px; padding: 28px 32px; color: #fff; margin-bottom: 24px;
     box-shadow: 0 10px 30px rgba(37, 99, 235, .25);
 }
-.hero h1 { color: #fff; font-size: 1.9rem; font-weight: 700; margin: 0; padding: 0; }
+.hero h1 { color: #fff; font-size: 1.45rem; line-height: 1.3; font-weight: 700; margin: 0; padding: 0; }
 .hero p  { color: #dbeafe; margin: 6px 0 0; font-weight: 300; }
 
 .section { font-weight: 600; font-size: 1.05rem; margin: 6px 0 2px; }
@@ -144,8 +144,8 @@ html, body, [class*="css"], .stMarkdown, .stButton button, label, input {
 st.markdown(
     """
 <div class="hero">
-  <h1>🏨 ประเมินความเสี่ยงการยกเลิกการจอง</h1>
-  <p>กรอกข้อมูลการจอง แล้วให้ตัวแบบประเมินโอกาสที่ลูกค้าจะยกเลิก</p>
+  <h1>🏨 Cancellation Risk Levels from Booking-Time Features for Setting Hotel Overbooking Quantities</h1>
+  <p>Enter the booking details to estimate the probability that the booking will be cancelled.</p>
 </div>
 """,
     unsafe_allow_html=True,
@@ -153,29 +153,29 @@ st.markdown(
 
 # ---------------- ฟอร์ม ----------------
 with st.form("booking"):
-    st.markdown('<div class="section">📅 ข้อมูลการจอง</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section">📅 Booking details</div>', unsafe_allow_html=True)
     c1, c2 = st.columns(2)
-    lead_time = c1.number_input("จองล่วงหน้า (วัน)", min_value=0, max_value=737, value=30)
-    adr = c2.number_input("ราคาเฉลี่ยต่อคืน (ADR)", min_value=0.0, value=100.0, step=5.0)
+    lead_time = c1.number_input("Lead time (days)", min_value=0, max_value=737, value=30)
+    adr = c2.number_input("Average daily rate (ADR)", min_value=0.0, value=100.0, step=5.0)
 
-    st.markdown('<div class="section">👨‍👩‍👧 จำนวนผู้เข้าพัก</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section">👨‍👩‍👧 Guests</div>', unsafe_allow_html=True)
     c3, c4, c5 = st.columns(3)
-    adults = c3.number_input("ผู้ใหญ่", 0, 60, 2)
-    children = c4.number_input("เด็ก", 0, 10, 0)
-    babies = c5.number_input("ทารก", 0, 10, 0)
+    adults = c3.number_input("Adults", 0, 60, 2)
+    children = c4.number_input("Children", 0, 10, 0)
+    babies = c5.number_input("Babies", 0, 10, 0)
 
-    st.markdown('<div class="section">🛏️ ห้องพักและสัญชาติ</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section">🛏️ Room and country</div>', unsafe_allow_html=True)
     c6, c7 = st.columns(2)
-    room_label = c6.selectbox("ประเภทห้อง", list(ROOM_TYPES))
-    country_label = c7.selectbox("ประเทศ", list(COUNTRIES), index=0)
+    room_label = c6.selectbox("Room type", list(ROOM_TYPES))
+    country_label = c7.selectbox("Country", list(COUNTRIES), index=0)
 
-    submitted = st.form_submit_button("🔮 ทำนายผล", use_container_width=True)
+    submitted = st.form_submit_button("🔮 Predict", use_container_width=True)
 
 # ---------------- ทำนาย ----------------
 if submitted:
     family_size = adults + children + babies
     if family_size == 0:
-        st.warning("กรุณาระบุจำนวนผู้เข้าพักอย่างน้อย 1 คน")
+        st.warning("Please enter at least one guest.")
         st.stop()
 
     # จำกัด ADR ไม่เกินขอบบนจากชุดฝึก แล้วส่งค่าดิบให้ Pipeline (หัวข้อการพัฒนาระบบเว็บต้นแบบ)
@@ -199,11 +199,11 @@ if submitted:
 <div class="result {cls}">
   <div class="icon">{icon}</div>
   <div style="flex:1">
-    <div class="label">ผลการประเมิน</div>
+    <div class="label">Assessment result</div>
     <div class="title">{title}</div>
     <div class="advice">{advice}</div>
     <div class="bar"><div style="width:{p_cancel*100:.1f}%"></div></div>
-    <div class="pct">โอกาสยกเลิก {p_cancel:.1%}</div>
+    <div class="pct">Cancellation probability {p_cancel:.1%}</div>
   </div>
 </div>
 """,
@@ -211,9 +211,9 @@ if submitted:
     )
 
     if adr > ADR_CAP:
-        st.caption(f"ราคาเกิน {ADR_CAP:,.3f} ระบบใช้ค่า {ADR_CAP:,.3f} ในการคำนวณ (ขอบบนจากชุดฝึก)")
+        st.caption(f"ADR above {ADR_CAP:,.3f} is capped at {ADR_CAP:,.3f} (upper bound from the training set).")
 
     st.caption(
-        f"ระดับความเสี่ยง: ต่ำ (≤ {T_LOW:.2f}) · ปานกลาง · สูง (≥ {T_HIGH:.2f}) — "
-        "ระดับสูงหมายถึงโอกาสยกเลิกสูงกว่าค่าเฉลี่ย ไม่ได้หมายความว่าจะยกเลิกแน่นอน"
+        f"Risk levels: low (≤ {T_LOW:.2f}) · medium · high (≥ {T_HIGH:.2f}). "
+        "High risk means a higher-than-average chance of cancellation, not a certain cancellation."
     )
